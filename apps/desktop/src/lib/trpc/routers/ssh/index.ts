@@ -10,7 +10,7 @@ import { z } from "zod";
 import { localDb } from "main/lib/local-db";
 import { getSSHConfigHosts } from "main/lib/terminal/ssh/ssh-config";
 import { getSSHTerminalManager } from "main/lib/terminal/ssh/ssh-manager";
-import { publicProcedure, router } from "../../trpc";
+import { publicProcedure, router } from "../..";
 
 function getSSHConnections(): SSHConnection[] {
 	const row = localDb

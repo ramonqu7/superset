@@ -163,7 +163,6 @@ export async function createSSHSession(
 					cols,
 					rows,
 				},
-				{ agentForward: connection.agentForwarding },
 				(err, shellStream) => {
 					if (err) {
 						rejectSession(
