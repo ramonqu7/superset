@@ -23,11 +23,15 @@ import {
 } from "./constants";
 import { HistoryManager } from "./history-manager";
 import { PrioritySemaphore } from "./priority-semaphore";
+import { getSSHTerminalManager, type SSHTerminalManager } from "../ssh";
 import type { ColdRestoreInfo, SessionInfo } from "./types";
 
 export class DaemonTerminalManager extends EventEmitter {
 	private client!: TerminalHostClient;
 	private sessions = new Map<string, SessionInfo>();
+	private sshManager: SSHTerminalManager = getSSHTerminalManager();
+	/** Track which panes are SSH sessions for routing write/resize/kill */
+	private sshPanes = new Set<string>();
 	private pendingSessions = new Map<string, Promise<SessionResult>>();
 	private killedSessionTombstones = new Map<string, number>();
 	private createOrAttachLimiter = new PrioritySemaphore(
@@ -307,6 +311,11 @@ export class DaemonTerminalManager extends EventEmitter {
 	private async doCreateOrAttach(
 		params: CreateSessionParams,
 	): Promise<SessionResult> {
+		// --- SSH path: if sshConnectionId is set, delegate to SSH manager ---
+		if (params.sshConnectionId) {
+			return this.doCreateOrAttachSSH(params);
+		}
+
 		const releaseCreateOrAttach = await this.createOrAttachLimiter.acquire(
 			this.getCreateOrAttachPriority(params),
 		);
@@ -494,6 +503,127 @@ export class DaemonTerminalManager extends EventEmitter {
 		}
 	}
 
+	/**
+	 * Create an SSH terminal session instead of a local daemon one.
+	 * Reads the SSH connection config from the local DB and delegates
+	 * to SSHTerminalManager.
+	 */
+	private async doCreateOrAttachSSH(
+		params: CreateSessionParams,
+	): Promise<SessionResult> {
+		const {
+			paneId,
+			workspaceId,
+			cwd,
+			cols = 80,
+			rows = 24,
+			initialCommands,
+			sshConnectionId,
+		} = params;
+
+		if (!sshConnectionId) {
+			throw new Error("[SSH] sshConnectionId is required for SSH sessions");
+		}
+
+		// Look up the SSH connection config from local DB
+		const { settings: settingsTable } = await import("@superset/local-db");
+		const { eq } = await import("drizzle-orm");
+		const row = localDb
+			.select({ sshConnections: settingsTable.sshConnections })
+			.from(settingsTable)
+			.where(eq(settingsTable.id, 1))
+			.get();
+
+		const connections = (row?.sshConnections ?? []) as Array<{
+			id: string;
+			name: string;
+			host: string;
+			port: number;
+			username: string;
+			authMethod: "key" | "password" | "agent";
+			privateKeyPath?: string;
+			passphrase?: string;
+			password?: string;
+			agentForwarding: boolean;
+		}>;
+
+		const connection = connections.find((c) => c.id === sshConnectionId);
+		if (!connection) {
+			throw new Error(
+				`[SSH] Connection profile ${sshConnectionId} not found`,
+			);
+		}
+
+		// Wire up SSH events to our EventEmitter (same events as daemon)
+		const onData = (id: string) => {
+			this.sshManager.removeAllListeners(`data:${id}`);
+			this.sshManager.on(`data:${id}`, (data: string) => {
+				this.emit(`data:${id}`, data);
+			});
+		};
+		const onExit = (id: string) => {
+			this.sshManager.removeAllListeners(`exit:${id}`);
+			this.sshManager.on(
+				`exit:${id}`,
+				(ev: { exitCode: number; signal?: string }) => {
+					this.emit(`exit:${id}`, ev);
+					this.emit("terminalExit", { paneId: id, ...ev });
+
+					const session = this.sessions.get(id);
+					if (session) {
+						session.isAlive = false;
+						session.exitReason = "exited";
+					}
+					this.sshPanes.delete(id);
+				},
+			);
+		};
+		const onError = (id: string) => {
+			this.sshManager.removeAllListeners(`error:${id}`);
+			this.sshManager.on(`error:${id}`, (ev: { error: string }) => {
+				this.emit(`error:${id}`, ev);
+			});
+		};
+
+		onData(paneId);
+		onExit(paneId);
+		onError(paneId);
+
+		const result = await this.sshManager.createSession({
+			paneId,
+			workspaceId,
+			connection,
+			cols,
+			rows,
+			cwd,
+			initialCommands,
+		});
+
+		this.sshPanes.add(paneId);
+		this.sessions.set(paneId, {
+			paneId,
+			workspaceId,
+			isAlive: true,
+			lastActive: Date.now(),
+			cwd: cwd || "~",
+			pid: null,
+			cols,
+			rows,
+		});
+
+		if (DEBUG_TERMINAL) {
+			console.log(
+				`[DaemonTerminalManager] SSH session created for ${paneId} -> ${connection.host}`,
+			);
+		}
+
+		return {
+			isNew: true,
+			scrollback: "",
+			wasRecovered: false,
+		};
+	}
+
 	private async attemptColdRestore({
 		paneId,
 		workspaceId,
@@ -576,6 +706,12 @@ export class DaemonTerminalManager extends EventEmitter {
 	write(params: { paneId: string; data: string }): void {
 		const { paneId, data } = params;
 
+		// Route to SSH manager if this is an SSH session
+		if (this.sshPanes.has(paneId)) {
+			this.sshManager.write(paneId, data);
+			return;
+		}
+
 		const session = this.sessions.get(paneId);
 		if (!session || !session.isAlive) {
 			throw new Error(`Terminal session ${paneId} not found or not alive`);
@@ -600,6 +736,18 @@ export class DaemonTerminalManager extends EventEmitter {
 			console.warn(
 				`[DaemonTerminalManager] Invalid resize geometry for ${paneId}: cols=${cols}, rows=${rows}`,
 			);
+			return;
+		}
+
+		// Route to SSH manager if this is an SSH session
+		if (this.sshPanes.has(paneId)) {
+			this.sshManager.resize(paneId, cols, rows);
+			const session = this.sessions.get(paneId);
+			if (session) {
+				session.lastActive = Date.now();
+				session.cols = cols;
+				session.rows = rows;
+			}
 			return;
 		}
 
@@ -645,6 +793,20 @@ export class DaemonTerminalManager extends EventEmitter {
 		deleteHistory?: boolean;
 	}): Promise<void> {
 		const { paneId, deleteHistory = false } = params;
+
+		// Route to SSH manager if this is an SSH session
+		if (this.sshPanes.has(paneId)) {
+			this.recordKilledSession(paneId);
+			const session = this.sessions.get(paneId);
+			if (session?.isAlive) {
+				session.isAlive = false;
+				session.exitReason = "killed";
+			}
+			await this.sshManager.kill(paneId);
+			this.sshPanes.delete(paneId);
+			return;
+		}
+
 		this.daemonAliveSessionIds.delete(paneId);
 		this.recordKilledSession(paneId);
 

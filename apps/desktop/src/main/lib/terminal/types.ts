@@ -105,6 +105,8 @@ export interface CreateSessionParams {
 	/** Allow restarting a session that was explicitly killed */
 	allowKilled?: boolean;
 	themeType?: "dark" | "light";
+	/** SSH connection ID — when set, session runs over SSH instead of local PTY */
+	sshConnectionId?: string;
 }
 
 export interface InternalCreateSessionParams extends CreateSessionParams {

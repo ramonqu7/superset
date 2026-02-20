@@ -71,6 +71,29 @@ export const terminalPresetSchema = z.object({
 export type TerminalPreset = z.infer<typeof terminalPresetSchema>;
 
 /**
+ * SSH auth methods
+ */
+export const SSH_AUTH_METHODS = ["key", "password", "agent"] as const;
+
+export type SSHAuthMethod = (typeof SSH_AUTH_METHODS)[number];
+
+/**
+ * SSH connection profile
+ */
+export const sshConnectionSchema = z.object({
+	id: z.string(),
+	name: z.string(),
+	host: z.string(),
+	port: z.number().default(22),
+	username: z.string(),
+	authMethod: z.enum(SSH_AUTH_METHODS),
+	privateKeyPath: z.string().optional(),
+	agentForwarding: z.boolean().default(false),
+});
+
+export type SSHConnection = z.infer<typeof sshConnectionSchema>;
+
+/**
  * Workspace type
  */
 export const workspaceTypeSchema = z.enum(["worktree", "branch"]);

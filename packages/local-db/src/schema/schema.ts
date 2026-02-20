@@ -8,6 +8,7 @@ import type {
 	GitHubStatus,
 	GitStatus,
 	TerminalLinkBehavior,
+	SSHConnection,
 	TerminalPreset,
 	WorkspaceType,
 } from "./zod";
@@ -171,6 +172,9 @@ export const settings = sqliteTable("settings", {
 	editorFontFamily: text("editor_font_family"),
 	editorFontSize: integer("editor_font_size"),
 	showResourceMonitor: integer("show_resource_monitor", { mode: "boolean" }),
+	sshConnections: text("ssh_connections", { mode: "json" }).$type<
+		SSHConnection[]
+	>(),
 });
 
 export type InsertSettings = typeof settings.$inferInsert;
