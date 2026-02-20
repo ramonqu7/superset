@@ -4,8 +4,7 @@
  * CRUD operations for SSH connection profiles and ~/.ssh/config parsing.
  */
 
-import { settings } from "@superset/local-db";
-import { sshConnectionSchema, type SSHConnection } from "@superset/local-db/schema/zod";
+import { settings, sshConnectionSchema, type SSHConnection } from "@superset/local-db";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { localDb } from "main/lib/local-db";

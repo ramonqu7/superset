@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
-import { workspaces } from "@superset/local-db";
+import { settings, workspaces } from "@superset/local-db";
+import { eq } from "drizzle-orm";
 import { track } from "main/lib/analytics";
 import { appState } from "main/lib/app-state";
 import { localDb } from "main/lib/local-db";
@@ -526,12 +527,10 @@ export class DaemonTerminalManager extends EventEmitter {
 		}
 
 		// Look up the SSH connection config from local DB
-		const { settings: settingsTable } = await import("@superset/local-db");
-		const { eq } = await import("drizzle-orm");
 		const row = localDb
-			.select({ sshConnections: settingsTable.sshConnections })
-			.from(settingsTable)
-			.where(eq(settingsTable.id, 1))
+			.select({ sshConnections: settings.sshConnections })
+			.from(settings)
+			.where(eq(settings.id, 1))
 			.get();
 
 		const connections = (row?.sshConnections ?? []) as Array<{
@@ -771,6 +770,15 @@ export class DaemonTerminalManager extends EventEmitter {
 
 	signal(params: { paneId: string; signal?: string }): void {
 		const { paneId, signal = "SIGINT" } = params;
+
+		// For SSH sessions, send Ctrl+C equivalent via write
+		if (this.sshPanes.has(paneId)) {
+			if (signal === "SIGINT") {
+				this.sshManager.write(paneId, "\x03");
+			}
+			return;
+		}
+
 		const session = this.sessions.get(paneId);
 
 		if (!session || !session.isAlive) {
@@ -830,6 +838,11 @@ export class DaemonTerminalManager extends EventEmitter {
 	detach(params: { paneId: string }): void {
 		const { paneId } = params;
 
+		// SSH sessions don't support detach (no daemon to keep them alive)
+		if (this.sshPanes.has(paneId)) {
+			return;
+		}
+
 		const session = this.sessions.get(paneId);
 
 		this.client.detach({ sessionId: paneId }).catch((error) => {
@@ -846,6 +859,11 @@ export class DaemonTerminalManager extends EventEmitter {
 
 	async clearScrollback(params: { paneId: string }): Promise<void> {
 		const { paneId } = params;
+
+		// SSH sessions: clear is a no-op (no daemon scrollback buffer)
+		if (this.sshPanes.has(paneId)) {
+			return;
+		}
 
 		await this.client.clearScrollback({ sessionId: paneId });
 
@@ -902,6 +920,17 @@ export class DaemonTerminalManager extends EventEmitter {
 	async killByWorkspaceId(
 		workspaceId: string,
 	): Promise<{ killed: number; failed: number }> {
+		// Also kill SSH sessions for this workspace
+		const sshResult = await this.sshManager
+			.killByWorkspaceId(workspaceId)
+			.catch(() => ({ killed: 0, failed: 0 }));
+		for (const paneId of this.sshPanes) {
+			const session = this.sessions.get(paneId);
+			if (session?.workspaceId === workspaceId) {
+				this.sshPanes.delete(paneId);
+			}
+		}
+
 		const paneIdsToKill = new Set<string>();
 
 		try {
@@ -956,7 +985,10 @@ export class DaemonTerminalManager extends EventEmitter {
 			);
 		}
 
-		return { killed, failed };
+		return {
+			killed: killed + sshResult.killed,
+			failed: failed + sshResult.failed,
+		};
 	}
 
 	async getSessionCountByWorkspaceId(workspaceId: string): Promise<number> {
@@ -1008,6 +1040,12 @@ export class DaemonTerminalManager extends EventEmitter {
 	}
 
 	async cleanup(): Promise<void> {
+		// Clean up SSH sessions
+		await this.sshManager.cleanup().catch((err) => {
+			console.error("[DaemonTerminalManager] SSH cleanup error:", err);
+		});
+		this.sshPanes.clear();
+
 		for (const timeout of this.cleanupTimeouts.values()) {
 			clearTimeout(timeout);
 		}
