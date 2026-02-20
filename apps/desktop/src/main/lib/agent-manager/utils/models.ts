@@ -15,6 +15,16 @@ const AVAILABLE_MODELS = [
 		provider: "Anthropic",
 	},
 	{ id: "openai/gpt-5.2-codex", name: "gpt-5.2-codex", provider: "Codex" },
+	{
+		id: "google/gemini-2.5-pro",
+		name: "gemini-2.5-pro",
+		provider: "Google",
+	},
+	{
+		id: "google/gemini-2.5-flash",
+		name: "gemini-2.5-flash",
+		provider: "Google",
+	},
 ] as const;
 
 export function getAvailableModels() {

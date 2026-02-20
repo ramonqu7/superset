@@ -1,4 +1,5 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { Agent } from "@mastra/core/agent";
 import { Mastra } from "@mastra/core/mastra";
 import { InMemoryStore } from "@mastra/core/storage";
@@ -54,6 +55,14 @@ function resolveModel({
 				"user-agent": "claude-cli/2.1.2 (external, cli)",
 				"x-app": "cli",
 			},
+		})(model);
+	}
+
+	if (provider === "google") {
+		const apiKey =
+			process.env.GOOGLE_API_KEY ?? process.env.GEMINI_API_KEY;
+		return createGoogleGenerativeAI({
+			...(apiKey ? { apiKey } : {}),
 		})(model);
 	}
 
